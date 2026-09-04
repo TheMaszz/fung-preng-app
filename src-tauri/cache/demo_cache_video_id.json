@@ -1,0 +1,18 @@
+{
+  "duration_secs": 210.5,
+  "lufs_rms_db": -13.5,
+  "bpm": 128.0,
+  "beat_timestamps": [
+    0.0,
+    0.468,
+    0.937
+  ],
+  "intro_end_sec": 12.0,
+  "outro_start_sec": 195.0,
+  "energy_profile": [
+    0.05,
+    0.12,
+    0.45,
+    0.88
+  ]
+}

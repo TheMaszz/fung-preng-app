@@ -1,0 +1,102 @@
+
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
+import { useSearchParams } from "react-router-dom";
+import { useEffect, useRef } from "react";
+
+export interface SearchResult {
+  id: string;
+  title: string;
+  channel: string;
+  duration_secs: number;
+  thumbnail_url: string;
+}
+
+const HomePage = () => {
+  const [searchParams] = useSearchParams();
+  const query = searchParams.get("q")?.trim() ?? "";
+  const searchQuery = useInfiniteQuery({
+    queryKey: ["youtube-search", query],
+    queryFn: ({ pageParam }) =>
+      invoke<SearchResult[]>("search_youtube", {
+        query,
+        offset: pageParam,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length === 10 ? allPages.length * 10 : undefined,
+    enabled: query.length > 0,
+  });
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const target = loadMoreRef.current;
+    if (!target) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && searchQuery.hasNextPage && !searchQuery.isFetchingNextPage) {
+          void searchQuery.fetchNextPage();
+        }
+      },
+      { rootMargin: "400px" },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [searchQuery.fetchNextPage, searchQuery.hasNextPage, searchQuery.isFetchingNextPage]);
+
+  const results = searchQuery.data?.pages.flat() ?? [];
+
+  return (
+    <section className="mx-auto max-w-6xl">
+      <h1 className="text-3xl font-bold text-[#e6edf3]">
+        {query ? `Search results for "${query}"` : "Welcome to Fung Preng"}
+      </h1>
+      {!query && (
+        <p className="mt-3 text-[#8b949e]">
+          Search for a YouTube track using the search bar above.
+        </p>
+      )}
+      {searchQuery.isLoading && (
+        <p className="mt-8 text-[#8b949e]">Searching YouTube...</p>
+      )}
+      {searchQuery.isError && (
+        <p className="mt-8 text-red-400">
+          Search failed: {searchQuery.error instanceof Error
+            ? searchQuery.error.message
+            : String(searchQuery.error)}
+        </p>
+      )}
+      {searchQuery.data && results.length === 0 && (
+        <p className="mt-8 text-[#8b949e]">No results found.</p>
+      )}
+      <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {results.map((result) => (
+          <article
+            className="overflow-hidden rounded-lg border border-[#30363d] bg-[#161b22]"
+            key={result.id}
+          >
+            <img
+              alt=""
+              className="aspect-video w-full object-cover"
+              src={result.thumbnail_url}
+            />
+            <div className="p-4">
+              <h2 className="line-clamp-2 font-medium text-[#e6edf3]">
+                {result.title}
+              </h2>
+              <p className="mt-2 text-sm text-[#8b949e]">{result.channel}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+      {searchQuery.hasNextPage && (
+        <div ref={loadMoreRef} className="py-8 text-center text-sm text-[#8b949e]">
+          {searchQuery.isFetchingNextPage ? "Loading more..." : "Scroll for more"}
+        </div>
+      )}
+    </section>
+  );
+};
+
+export default HomePage

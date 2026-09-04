@@ -1,0 +1,33 @@
+[package]
+name = "fung-preng-app"
+version = "0.1.0"
+description = "Fung Preng App"
+authors = ["TheMasz"]
+edition = "2021"
+default-run = "fung-preng-app"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "fung_preng_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }  
+tokio = { version = "1", features = ["process", "fs", "macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+symphonia = { version = "0.5", features = ["all"] }
+cpal = "0.15"
+rubato = "0.15"
+realfft = "3.3"
