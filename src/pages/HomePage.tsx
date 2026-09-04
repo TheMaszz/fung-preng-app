@@ -1,16 +1,9 @@
-
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useSearchParams } from "react-router-dom";
 import { useEffect, useRef } from "react";
-
-export interface SearchResult {
-  id: string;
-  title: string;
-  channel: string;
-  duration_secs: number;
-  thumbnail_url: string;
-}
+import { SearchResult } from "../types";
+import { usePlayer } from "../context/PlayerContext";
 
 const HomePage = () => {
   const [searchParams] = useSearchParams();
@@ -28,6 +21,7 @@ const HomePage = () => {
     enabled: query.length > 0,
   });
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const { playTrack } = usePlayer();
 
   useEffect(() => {
     const target = loadMoreRef.current;
@@ -35,7 +29,11 @@ const HomePage = () => {
 
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting && searchQuery.hasNextPage && !searchQuery.isFetchingNextPage) {
+        if (
+          entry.isIntersecting &&
+          searchQuery.hasNextPage &&
+          !searchQuery.isFetchingNextPage
+        ) {
           void searchQuery.fetchNextPage();
         }
       },
@@ -43,9 +41,14 @@ const HomePage = () => {
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [searchQuery.fetchNextPage, searchQuery.hasNextPage, searchQuery.isFetchingNextPage]);
+  }, [
+    searchQuery.fetchNextPage,
+    searchQuery.hasNextPage,
+    searchQuery.isFetchingNextPage,
+  ]);
 
   const results = searchQuery.data?.pages.flat() ?? [];
+  
 
   return (
     <section className="mx-auto max-w-6xl">
@@ -62,7 +65,8 @@ const HomePage = () => {
       )}
       {searchQuery.isError && (
         <p className="mt-8 text-red-400">
-          Search failed: {searchQuery.error instanceof Error
+          Search failed:{" "}
+          {searchQuery.error instanceof Error
             ? searchQuery.error.message
             : String(searchQuery.error)}
         </p>
@@ -73,8 +77,8 @@ const HomePage = () => {
       <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {results.map((result) => (
           <article
-            className="overflow-hidden rounded-lg border border-[#30363d] bg-[#161b22]"
-            key={result.id}
+            className="overflow-hidden rounded-lg border border-[#30363d] bg-[#161b22] hover:bg-[#21262d] cursor-pointer transition"
+            onClick={() => playTrack(result)}
           >
             <img
               alt=""
@@ -91,12 +95,17 @@ const HomePage = () => {
         ))}
       </div>
       {searchQuery.hasNextPage && (
-        <div ref={loadMoreRef} className="py-8 text-center text-sm text-[#8b949e]">
-          {searchQuery.isFetchingNextPage ? "Loading more..." : "Scroll for more"}
+        <div
+          ref={loadMoreRef}
+          className="py-8 text-center text-sm text-[#8b949e]"
+        >
+          {searchQuery.isFetchingNextPage
+            ? "Loading more..."
+            : "Scroll for more"}
         </div>
       )}
     </section>
   );
 };
 
-export default HomePage
+export default HomePage;

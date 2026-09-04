@@ -4,6 +4,7 @@ pub mod decode;
 pub mod extract;
 pub mod mixer;
 pub mod output;
+pub mod playback;
 pub mod resample;
 pub mod search;
 
@@ -19,6 +20,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             greet,
+            playback::play_track,
             search_youtube,
             youtube_suggestions
         ])
