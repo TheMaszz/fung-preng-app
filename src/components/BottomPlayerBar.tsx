@@ -1,13 +1,23 @@
-import { useState } from "react";
 import { usePlayer } from "../context/PlayerContext";
 import { Heart, ListMusic, Mic2, Pause, Play, Repeat, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX } from "lucide-react";
 
 export const BottomPlayerBar: React.FC = () => {
-  const { currentTrack, isPlaying, togglePlay } = usePlayer();
-  const [volume, setVolume] = useState(70);
+  const {
+    currentTrack,
+    isPlaying,
+    togglePlay,
+    volume,
+    updateVolume,
+    positionSecs,
+    durationSecs,
+  } = usePlayer();
+  const formatTime = (seconds: number) =>
+    `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+  const progressPercent =
+    durationSecs > 0 ? Math.min(100, (positionSecs / durationSecs) * 100) : 0;
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setVolume(Number(e.target.value));
+    void updateVolume(Number(e.target.value));
   };
 
   const VolumeIcon = volume === 0 ? VolumeX : volume < 50 ? Volume1 : Volume2;
@@ -69,17 +79,14 @@ export const BottomPlayerBar: React.FC = () => {
         </div>
 
         <div className="flex w-full items-center gap-2 text-xs text-[#8b949e]">
-          <span>0:00</span>
+          <span>{formatTime(positionSecs)}</span>
           <div className="h-1 flex-1 rounded-full bg-[#30363d] group cursor-pointer">
-            <div className="h-1 w-0 rounded-full bg-[#58a6ff] group-hover:bg-[#79c0ff] transition" />
+            <div
+              className="h-1 rounded-full bg-[#58a6ff] group-hover:bg-[#79c0ff] transition"
+              style={{ width: `${progressPercent}%` }}
+            />
           </div>
-          <span>
-            {currentTrack?.duration_secs
-              ? `${Math.floor(currentTrack.duration_secs / 60)}:${String(
-                  Math.floor(currentTrack.duration_secs % 60)
-                ).padStart(2, "0")}`
-              : "0:00"}
-          </span>
+          <span>{formatTime(durationSecs || currentTrack?.duration_secs || 0)}</span>
         </div>
       </div>
 
@@ -92,7 +99,7 @@ export const BottomPlayerBar: React.FC = () => {
           <ListMusic size={16} />
         </button>
         <button
-          onClick={() => setVolume(volume === 0 ? 70 : 0)}
+          onClick={() => void updateVolume(volume === 0 ? 80 : 0)}
           className="hover:text-[#e6edf3] transition"
         >
           <VolumeIcon size={16} />

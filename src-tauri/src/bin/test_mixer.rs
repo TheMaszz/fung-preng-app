@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     )?;
 
     println!("\n=== 4. Playing Audio ===");
-    let audio_to_play = decode::Audio {
+    let audio_to_play = decode::DecodedAudio {
         samples: mixed.samples,
         sample_rate: mixed.sample_rate,
         channels: mixed.channels,

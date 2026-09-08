@@ -12,6 +12,41 @@ use std::process::Stdio;
 use tokio::process::Command;
 use uuid::Uuid;
 
+/// Resolves the direct, streamable audio URL for a video WITHOUT downloading
+/// anything — this is the fast part (yt-dlp's webpage/player-JS resolution,
+/// typically 1-4s), decoupled from the slow part (actually fetching bytes,
+/// which stream_source.rs now does progressively instead of all at once).
+// src-tauri/src/extract.rs
+
+// src-tauri/src/extract.rs
+pub async fn get_direct_url(video_id: &str) -> Result<String> {
+    let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+
+    let output = tokio::process::Command::new("yt-dlp")
+    .args([
+        "-g",
+        "-f", "ba[ext=m4a]/ba[acodec^=mp4a]/ba", 
+        "--no-playlist",
+        "--no-warnings",
+        "--force-ipv4",
+        &video_url,
+    ])
+    .output()
+    .await?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("yt-dlp failed: {}", err));
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        return Err(anyhow!("yt-dlp returned an empty URL"));
+    }
+
+    Ok(url)
+}
+
 /// Pulls the best available audio-only stream for a YouTube video ID
 /// and writes it to a temp file. Returns the path to that file.
 ///
