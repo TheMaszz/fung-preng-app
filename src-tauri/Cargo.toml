@@ -1,10 +1,10 @@
 [package]
-name = "fung-preng-app"
+name = "fung-pleng-app"
 version = "0.1.0"
 description = "Fung Preng App"
 authors = ["TheMasz"]
 edition = "2021"
-default-run = "fung-preng-app"
+default-run = "fung-pleng-app"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -12,7 +12,7 @@ default-run = "fung-preng-app"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "fung_preng_app_lib"
+name = "fung_pleng_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -33,3 +33,4 @@ rubato = "0.15"
 realfft = "3.3"
 ureq = "2"
 rtrb = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }

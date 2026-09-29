@@ -1,14 +1,21 @@
 // src/components/Layout.tsx
-import React from "react";
+import React, { useState } from "react";
 import { BottomPlayerBar } from "../components/BottomPlayerBar";
 import HeaderBar from "../components/HeaderBar";
 import { Sidebar } from "../components/SideBar";
+import QueueDrawer from "../components/QueueDrawer";
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
 const Layout: React.FC<LayoutProps> = ({ children }) => {
+  const [isQueueDrawer, setIsQueueDrawer] = useState(false);
+
+  const queueDrawerHandler = () => {
+    setIsQueueDrawer(!isQueueDrawer);
+  };
+
   return (
     <div className="flex h-screen overflow-hidden bg-[#0d1117] text-[#c9d1d9]">
       {/* Sidebar Navigation */}
@@ -24,7 +31,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       </div>
 
       {/* Persistent Player */}
-      <BottomPlayerBar />
+      <BottomPlayerBar queueDrawerHandler={queueDrawerHandler} />
+      
+      {/* Queue Drawer */}
+      {isQueueDrawer && <QueueDrawer onClose={() => setIsQueueDrawer(false)} />}
     </div>
   );
 };

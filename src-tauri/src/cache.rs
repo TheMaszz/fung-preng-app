@@ -1,6 +1,7 @@
 // src-tauri/src/cache.rs
 use crate::analyze::AudioAnalysis;
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
@@ -11,6 +12,14 @@ use std::time::{Duration, Instant};
 pub struct UrlCacheEntry {
     pub url: String,
     pub fetched_at: Instant,
+}
+
+/// Sizes in bytes, split by what the files actually are on disk.
+#[derive(Serialize, Clone, Default)]
+pub struct CacheStats {
+    pub songs: u64,    // *.wav  (decoded audio)
+    pub analysis: u64, // *.json (AudioAnalysis)
+    pub temp: u64,     // anything else (.part, .tmp, leftovers)
 }
 
 #[derive(Clone)]
@@ -30,6 +39,14 @@ impl CacheManager {
             cache_dir: dir,
             url_cache: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Prefer this over `default_dir()`: a real, stable OS location
+    /// (and it won't trigger Tauri dev-mode rebuilds like ./cache can).
+    pub fn from_app(app: &tauri::AppHandle) -> Result<Self> {
+        use tauri::Manager;
+        let dir = app.path().app_cache_dir()?.join("audio");
+        Self::new(dir)
     }
 
     pub fn default_dir() -> Result<Self> {
@@ -79,5 +96,53 @@ impl CacheManager {
         let mut file = File::create(path)?;
         file.write_all(json_str.as_bytes())?;
         Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // NEW: real disk usage + clearing
+    // ---------------------------------------------------------------
+
+    /// Walks the cache dir and sums real file sizes by type.
+    pub fn stats(&self) -> CacheStats {
+        let mut s = CacheStats::default();
+        let Ok(rd) = fs::read_dir(&self.cache_dir) else {
+            return s;
+        };
+        for entry in rd.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let len = meta.len();
+            match entry.path().extension().and_then(|e| e.to_str()) {
+                Some("wav") => s.songs += len,
+                Some("json") => s.analysis += len,
+                _ => s.temp += len,
+            }
+        }
+        s
+    }
+
+    /// Deletes cached files. Files that can't be removed (e.g. the track
+    /// currently playing, on Windows) are skipped rather than failing.
+    /// `keep_ids` lets the caller protect specific tracks, e.g. current + next.
+    pub fn clear(&self, keep_ids: &[String]) -> CacheStats {
+        if let Ok(rd) = fs::read_dir(&self.cache_dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if keep_ids.iter().any(|k| k == stem) {
+                    continue;
+                }
+                let _ = fs::remove_file(&path);
+            }
+        }
+        if let Ok(mut c) = self.url_cache.write() {
+            c.clear();
+        }
+        self.stats()
     }
 }

@@ -1,3 +1,4 @@
+// src-tauri/src/analyze.rs
 use anyhow::Result;
 use realfft::RealFftPlanner;
 use serde::{Deserialize, Serialize};
@@ -40,7 +41,6 @@ impl Analyzer {
         let window_size = (self.sample_rate as usize) / 10; // 100ms
         let energy_profile = calculate_energy_profile(&mono_samples, window_size);
 
-        // Dynamic boundary detection relative to average track loudness
         let (intro_end_sec, outro_start_sec) =
             detect_boundaries(&energy_profile, duration_secs, lufs_rms_db);
 
@@ -88,21 +88,16 @@ fn detect_boundaries(
         return (0.0, duration);
     }
 
-    // Dynamic threshold: 22 dB below the song's average energy level.
-    // Clamped between -42 dB and -26 dB to handle ultra-loud or very quiet masters.
     let threshold_db = (lufs_rms_db - 22.0).clamp(-42.0, -26.0);
     let min_linear = 10.0f32.powf(threshold_db / 20.0);
 
     let chunk_duration = duration / energy.len() as f64;
 
-    // Intro: First chunk exceeding musical energy threshold
     let mut intro_idx = 0;
     while intro_idx < energy.len() && energy[intro_idx] < min_linear {
         intro_idx += 1;
     }
 
-    // Outro: Backward scan with a 1.5-second (15 chunks) moving average window.
-    // Ignores short trailing audio, talking, or quiet outro noise.
     let window_len = (1.5 / chunk_duration).max(1.0) as usize;
     let mut outro_idx = energy.len().saturating_sub(1);
 
@@ -134,9 +129,10 @@ fn estimate_bpm_and_beats(samples: &[f32], sample_rate: u32) -> Result<(f32, Vec
     let mut prev_magnitudes = vec![0.0; fft_size / 2 + 1];
     let mut onset_envelope = Vec::new();
 
-    for chunk in samples.chunks(hop_size) {
-        if chunk.len() < fft_size { break; }
-        input.copy_from_slice(&chunk[..fft_size]);
+    // FIX: Sliding window step by hop_size while copying 1024 samples into FFT input
+    let mut pos = 0;
+    while pos + fft_size <= samples.len() {
+        input.copy_from_slice(&samples[pos..pos + fft_size]);
 
         fft.process_with_scratch(&mut input, &mut output, &mut scratch)?;
 
@@ -148,6 +144,12 @@ fn estimate_bpm_and_beats(samples: &[f32], sample_rate: u32) -> Result<(f32, Vec
             prev_magnitudes[i] = mag;
         }
         onset_envelope.push(flux);
+
+        pos += hop_size;
+    }
+
+    if onset_envelope.is_empty() {
+        return Ok((120.0, Vec::new()));
     }
 
     let frame_rate = sample_rate as f32 / hop_size as f32;
@@ -160,7 +162,6 @@ fn estimate_bpm_and_beats(samples: &[f32], sample_rate: u32) -> Result<(f32, Vec
     let mut max_weighted_corr = 0.0;
     let mut best_lag = min_lag;
 
-    // Autocorrelation with logarithmic tempo-preference weighting (~120 BPM)
     for lag in min_lag..=max_lag.min(onset_envelope.len() / 2) {
         let mut corr = 0.0;
         for i in 0..(onset_envelope.len() - lag) {
@@ -183,7 +184,6 @@ fn estimate_bpm_and_beats(samples: &[f32], sample_rate: u32) -> Result<(f32, Vec
         120.0
     };
 
-    // Phase alignment: Find first prominent onset transient peak
     let mut phase_offset_sec = 0.0;
     let threshold = onset_envelope.iter().cloned().fold(0.0f32, f32::max) * 0.3;
     for (idx, &flux) in onset_envelope.iter().enumerate() {

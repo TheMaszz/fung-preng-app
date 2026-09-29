@@ -7,3 +7,64 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* ---------- Theme tokens (GitHub Primer colors) ---------- */
+:root {
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #d0d7de;        /* border-default */
+  --scrollbar-thumb-hover: #afb8c1;  /* border-muted, darker */
+  --scrollbar-thumb-active: #8c959f; /* fg-subtle */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --scrollbar-track: transparent;
+    --scrollbar-thumb: #30363d;        /* dark border-default */
+    --scrollbar-thumb-hover: #484f58;
+    --scrollbar-thumb-active: #6e7681;
+  }
+}
+
+/* If you toggle themes manually, use this instead of the media query */
+[data-theme="dark"] {
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #30363d;
+  --scrollbar-thumb-hover: #484f58;
+  --scrollbar-thumb-active: #6e7681;
+}
+
+/* ---------- Firefox ---------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+/* ---------- Chrome, Edge, Safari ---------- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  border-radius: 999px;
+  /* Transparent border makes the thumb look thinner and "floating" */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

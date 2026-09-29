@@ -22,13 +22,14 @@ use uuid::Uuid;
 pub async fn get_direct_url(video_id: &str) -> Result<String> {
     let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
 
-    let output = tokio::process::Command::new("yt-dlp")
+let output = tokio::process::Command::new("yt-dlp")
     .args([
         "-g",
-        "-f", "ba[ext=m4a]/ba[acodec^=mp4a]/ba", 
+        "-f", "ba[ext=m4a]/ba[acodec^=mp4a]/ba",
         "--no-playlist",
         "--no-warnings",
         "--force-ipv4",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         &video_url,
     ])
     .output()

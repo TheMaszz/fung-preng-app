@@ -1,11 +1,32 @@
 import { usePlayer } from "../context/PlayerContext";
-import { Heart, ListMusic, Mic2, Pause, Play, Repeat, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX } from "lucide-react";
+import {
+  Heart,
+  ListMusic,
+  Mic2,
+  Pause,
+  Play,
+  Repeat,
+  Shuffle,
+  SkipBack,
+  SkipForward,
+  Volume1,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 
-export const BottomPlayerBar: React.FC = () => {
+interface BottomPlayerBarProps {
+  queueDrawerHandler: () => void;
+}
+
+export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
+  queueDrawerHandler,
+}) => {
   const {
     currentTrack,
     isPlaying,
     togglePlay,
+    playPrevious,
+    playNext,
     volume,
     updateVolume,
     positionSecs,
@@ -36,10 +57,16 @@ export const BottomPlayerBar: React.FC = () => {
           <div className="h-12 w-12 rounded-md bg-gradient-to-br from-[#1f6feb] to-[#8957e5]" />
         )}
         <div className="max-w-[140px] truncate">
-          <p className="truncate text-sm font-medium text-[#e6edf3]">
+          <p
+            className="truncate text-sm font-medium text-[#e6edf3]"
+            title={currentTrack ? currentTrack.title : "No track playing"}
+          >
             {currentTrack ? currentTrack.title : "No track playing"}
           </p>
-          <p className="truncate text-xs text-[#8b949e]">
+          <p
+            className="truncate text-xs text-[#8b949e]"
+            title={currentTrack ? currentTrack.channel : "Select a song"}
+          >
             {currentTrack ? currentTrack.channel : "Select a song"}
           </p>
         </div>
@@ -54,7 +81,10 @@ export const BottomPlayerBar: React.FC = () => {
           <button className="text-[#8b949e] hover:text-[#e6edf3] transition">
             <Shuffle size={18} />
           </button>
-          <button className="text-[#c9d1d9] hover:text-[#e6edf3] transition">
+          <button
+            className="text-[#c9d1d9] hover:text-[#e6edf3] transition"
+            onClick={() => void playPrevious()}
+          >
             <SkipBack size={20} fill="currentColor" />
           </button>
 
@@ -70,7 +100,10 @@ export const BottomPlayerBar: React.FC = () => {
             )}
           </button>
 
-          <button className="text-[#c9d1d9] hover:text-[#e6edf3] transition">
+          <button
+            className="text-[#c9d1d9] hover:text-[#e6edf3] transition"
+            onClick={() => void playNext()}
+          >
             <SkipForward size={20} fill="currentColor" />
           </button>
           <button className="text-[#8b949e] hover:text-[#e6edf3] transition">
@@ -86,7 +119,9 @@ export const BottomPlayerBar: React.FC = () => {
               style={{ width: `${progressPercent}%` }}
             />
           </div>
-          <span>{formatTime(durationSecs || currentTrack?.duration_secs || 0)}</span>
+          <span>
+            {formatTime(durationSecs || currentTrack?.duration_secs || 0)}
+          </span>
         </div>
       </div>
 
@@ -95,7 +130,10 @@ export const BottomPlayerBar: React.FC = () => {
         <button className="hover:text-[#e6edf3] transition">
           <Mic2 size={16} />
         </button>
-        <button className="hover:text-[#e6edf3] transition">
+        <button
+          className="hover:text-[#e6edf3] transition"
+          onClick={queueDrawerHandler}
+        >
           <ListMusic size={16} />
         </button>
         <button

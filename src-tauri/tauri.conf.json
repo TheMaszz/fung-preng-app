@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "fung-preng-app",
+  "productName": "fung-pleng-app",
   "version": "0.1.0",
-  "identifier": "com.dev.fung-preng-app",
+  "identifier": "com.dev.fung-pleng-app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "fung-preng-app",
-        "width": 800,
-        "height": 600
+        "title": "fung-pleng-app",
+        "width": 1200,
+        "height": 800,
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {

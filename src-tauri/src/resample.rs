@@ -78,3 +78,57 @@ pub fn resample(input: &[f32], channels: usize, from_rate: u32, to_rate: u32) ->
     }
     Ok(interleaved)
 }
+
+/// Converts channel count via simple duplication/downmix, independent of any
+/// sample-rate change. Mirrors the mono<->stereo handling used elsewhere in
+/// the app (see stream_player's prepare_for_output) so two tracks with
+/// different channel counts don't get zipped together frame-for-frame with
+/// mismatched channel layouts.
+pub fn convert_channels(input: &[f32], in_channels: usize, out_channels: usize) -> Vec<f32> {
+    if in_channels == out_channels || in_channels == 0 || out_channels == 0 {
+        return input.to_vec();
+    }
+    let frame_count = input.len() / in_channels;
+    let mut out = Vec::with_capacity(frame_count * out_channels);
+    for frame in 0..frame_count {
+        let base = frame * in_channels;
+        match out_channels {
+            2 if in_channels == 1 => {
+                let s = input[base];
+                out.push(s);
+                out.push(s);
+            }
+            2 => {
+                out.push(input[base]);
+                out.push(*input.get(base + 1).unwrap_or(&input[base]));
+            }
+            1 => {
+                let sum: f32 = input[base..base + in_channels].iter().sum();
+                out.push(sum / in_channels as f32);
+            }
+            _ => {
+                for ch in 0..out_channels {
+                    out.push(*input.get(base + ch).unwrap_or(&0.0));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Aligns `input` (decoded at `from_rate`/`from_channels`) to
+/// `to_rate`/`to_channels` — channel conversion first (at the original
+/// rate), then resampling, same order as stream_player's
+/// prepare_for_output. Use this on Track B before handing it to
+/// `Mixer::mix`, which assumes both tracks already share a single
+/// sample_rate/channels.
+pub fn align_track(
+    input: &[f32],
+    from_rate: u32,
+    from_channels: usize,
+    to_rate: u32,
+    to_channels: usize,
+) -> Result<Vec<f32>> {
+    let channel_converted = convert_channels(input, from_channels, to_channels);
+    resample(&channel_converted, to_channels, from_rate, to_rate)
+}
