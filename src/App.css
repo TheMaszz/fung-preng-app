@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+@keyframes progress-indeterminate {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+.progress-indeterminate {
+  animation: progress-indeterminate 1.4s ease-in-out infinite;
+}
+
 :root {
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   font-synthesis: none;

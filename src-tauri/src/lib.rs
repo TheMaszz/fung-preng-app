@@ -55,6 +55,7 @@ pub fn run() {
             commands::pause_audio,
             commands::resume_audio,
             commands::resolve_audio_url,
+            commands::get_track_duration,
             commands::stop_audio,
             commands::set_volume,
             commands::set_eq,

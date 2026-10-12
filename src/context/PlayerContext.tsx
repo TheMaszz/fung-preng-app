@@ -30,7 +30,6 @@ interface PlayerContextType {
   playTrack: (
     track: Track,
     newQueue?: Track[],
-    directUrl?: string,
   ) => Promise<void>;
   playNext: () => Promise<void>;
   playPrevious: () => Promise<void>;
@@ -117,38 +116,9 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
   const playTrackAtIndex = async (
     index: number,
     currentQueue = queueRef.current,
-    overrideDirectUrl?: string,
   ) => {
     const targetTrack = currentQueue[index];
     if (!targetTrack) return;
-
-    let effectiveDirectUrl = overrideDirectUrl ?? targetTrack.directUrl;
-
-    // If we don't have a direct URL yet, resolve it right now before playing!
-    if (!effectiveDirectUrl) {
-      try {
-        effectiveDirectUrl = await invoke<string>("resolve_audio_url", {
-          videoId: targetTrack.id,
-        });
-        // Update it in the queue so we have it cached
-        setQueue((prevQueue) => {
-          const updated = [...prevQueue];
-          if (updated[index] && updated[index].id === targetTrack.id) {
-            updated[index] = {
-              ...updated[index],
-              directUrl: effectiveDirectUrl,
-            };
-          }
-          return updated;
-        });
-      } catch (err) {
-        console.error(
-          `[PLAY] Failed to resolve audio URL for ${targetTrack.title}:`,
-          err,
-        );
-        return;
-      }
-    }
 
     transitioningRef.current = false;
     trackStartedAtRef.current = performance.now();
@@ -162,11 +132,17 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
       console.warn("Failed to record listening history:", error);
     });
 
-    await invoke("play_audio", {
-      videoId: targetTrack.id,
-      durationSecs: targetTrack.duration_secs ?? null,
-      directUrl: effectiveDirectUrl,
-    });
+    try {
+      await invoke("play_audio", {
+        videoId: targetTrack.id,
+        durationSecs: targetTrack.duration_secs ?? null,
+        directUrl: null,
+      });
+    } catch (err) {
+      console.error(`[PLAY] Failed to start ${targetTrack.title}:`, err);
+      setIsPlaying(false);
+      throw err;
+    }
 
     if (index + 1 < currentQueue.length) {
       void prefetchTrackUrl(index + 1, currentQueue);
@@ -217,7 +193,6 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
   const playTrack = async (
     track: Track,
     newQueue?: Track[],
-    directUrl?: string,
   ) => {
     const activeQueue = newQueue ?? queueRef.current;
     if (newQueue) setQueue(newQueue);
@@ -227,9 +202,9 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
       const updatedQueue = [...activeQueue, track];
       setQueue(updatedQueue);
       idx = updatedQueue.length - 1;
-      await playTrackAtIndex(idx, updatedQueue, directUrl);
+      await playTrackAtIndex(idx, updatedQueue);
     } else {
-      await playTrackAtIndex(idx, activeQueue, directUrl);
+      await playTrackAtIndex(idx, activeQueue);
     }
   };
 
@@ -346,6 +321,57 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
     };
   }, []);
 
+  useEffect(() => {
+    const unlisten = listen<{ video_id: string; error: string }>(
+      "playback-error",
+      (event) => {
+        if (currentTrack?.id !== event.payload.video_id) return;
+        console.error(
+          `[PLAY] Playback failed for ${currentTrack.title}: ${event.payload.error}`,
+        );
+        setIsPlaying(false);
+      },
+    );
+
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [currentTrack]);
+
+  useEffect(() => {
+    const track = currentTrack;
+    if (!track || (track.duration_secs ?? 0) > 0) return;
+
+    let cancelled = false;
+    void invoke<number | null>("get_track_duration", {
+      videoId: track.id,
+    })
+      .then((durationSecs) => {
+        if (cancelled || !durationSecs || durationSecs <= 0) return;
+
+        setCurrentTrack((activeTrack) =>
+          activeTrack?.id === track.id
+            ? { ...activeTrack, duration_secs: durationSecs }
+            : activeTrack,
+        );
+        setQueue((activeQueue) =>
+          activeQueue.map((queuedTrack) =>
+            queuedTrack.id === track.id
+              ? { ...queuedTrack, duration_secs: durationSecs }
+              : queuedTrack,
+          ),
+        );
+        setDurationSecs(durationSecs);
+      })
+      .catch((error) => {
+        console.warn(`Failed to load duration for ${track.title}:`, error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack]);
+
   const togglePlay = async () => {
     if (!currentTrack) return;
 
@@ -367,19 +393,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
     transitioningRef.current = false;
     radioQueueRef.current = true;
 
-    let effectiveDirectUrl = track.directUrl;
-    if (!effectiveDirectUrl) {
-      try {
-        effectiveDirectUrl = await invoke<string>("resolve_audio_url", {
-          videoId: track.id,
-        });
-      } catch (err) {
-        console.error("Failed to resolve initial radio track URL:", err);
-        return;
-      }
-    }
-
-    const initialTrack = { ...track, directUrl: effectiveDirectUrl };
+    const initialTrack = track;
 
     setCurrentTrack(initialTrack);
     setIsPlaying(true);
@@ -389,11 +403,16 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
       console.warn("Failed to record listening history:", error);
     });
 
-    void invoke("play_audio", {
-      videoId: initialTrack.id,
-      durationSecs: initialTrack.duration_secs ?? null,
-      directUrl: effectiveDirectUrl,
-    });
+    try {
+      await invoke("play_audio", {
+        videoId: initialTrack.id,
+        durationSecs: initialTrack.duration_secs ?? null,
+        directUrl: null,
+      });
+    } catch (err) {
+      console.error("[PLAY] play_audio failed:", err);
+      setIsPlaying(false);
+    }
 
     try {
       const related = await invoke<Track[]>("get_related_tracks", {
@@ -409,7 +428,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     } catch (err) {
       console.error("Failed to fetch radio queue:", err);
-      setQueue([initialTrack]);  
+      setQueue([initialTrack]);
       setCurrentIndex(0);
     }
   };

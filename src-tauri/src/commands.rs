@@ -8,7 +8,7 @@ use crate::player_state::PlaybackProgress;
 use crate::stream_player;
 use crate::stream_source::HttpRangeSource;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 
@@ -30,6 +30,10 @@ pub struct AppState {
     pub progress_secs: Arc<AtomicU32>, // บันทึกเวลาปัจจุบัน (วินาที)
     pub duration_secs: Arc<AtomicU32>, // ความยาวเพลงทั้งหมด (วินาที)
     pub is_paused: Arc<AtomicBool>,
+    // Bumped every time a new stream starts. Only the stream holding the
+    // latest epoch may write progress_secs, so an old stream that is still
+    // fading out can't clobber the new track's position.
+    pub progress_epoch: Arc<AtomicU64>,
     pub eq_enabled: Arc<AtomicBool>,
     pub eq_gains: Arc<Mutex<[f32; 7]>>,
     pub prepared_mixes: PreparedMixCache,
@@ -51,6 +55,7 @@ impl Default for AppState {
             progress_secs: Arc::new(AtomicU32::new(0)),
             duration_secs: Arc::new(AtomicU32::new(0)),
             is_paused: Arc::new(AtomicBool::new(false)),
+            progress_epoch: Arc::new(AtomicU64::new(0)),
             eq_enabled: Arc::new(AtomicBool::new(true)),
             eq_gains: Arc::new(Mutex::new([0.0; 7])),
             prepared_mixes: Arc::new(Mutex::new(HashMap::new())),
@@ -185,14 +190,15 @@ pub fn remove_track_from_playlist(
 #[tauri::command]
 pub async fn play_audio(
     video_id: String,
-    duration_secs: Option<u64>,
-    direct_url: Option<String>,
+    duration_secs: Option<f64>, // was Option<u64>: YouTube durations are fractional
+    direct_url: Option<String>, // kept so the JS call signature doesn't change
     state: State<'_, AppState>,
-    cache: State<'_, CacheManager>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    // 1. แก้ไขปัญหา Mixing: สั่งหยุด (Cancel) เพลงเก่าทันที
-    {
+    let _ = &direct_url; // no longer used: we download the audio ourselves
+
+    // 1. Cancel the previous track and install a fresh cancel flag.
+    let cancel_flag = {
         let mut flag_guard = state
             .current_cancel_flag
             .lock()
@@ -204,39 +210,23 @@ pub async fn play_audio(
 
         let new_flag = Arc::new(AtomicBool::new(false));
         *flag_guard = Some(Arc::clone(&new_flag));
-    }
-
-    let cancel_flag = {
-        let flag_guard = state.current_cancel_flag.lock().unwrap();
-        Arc::clone(flag_guard.as_ref().unwrap())
+        new_flag
     };
 
-    // A brand new, non-crossfaded track start invalidates any in-flight or
-    // cached crossfade prep tied to whatever was playing before - none of
-    // it is relevant to this new track.
+    // A brand new, non-crossfaded start invalidates any cached crossfade prep.
     {
         let mut prepared_guard = state.prepared_mixes.lock().unwrap();
         prepared_guard.clear();
     }
 
-    // Reset Progress เวลาสำหรับเพลงใหม่
+    // Reset progress / duration for the new track.
+    state.is_paused.store(false, Ordering::SeqCst);
+    let my_epoch = state.progress_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    let progress_epoch = Arc::clone(&state.progress_epoch);
     state.progress_secs.store(0, Ordering::Relaxed);
     state
         .duration_secs
-        .store(duration_secs.unwrap_or(0) as u32, Ordering::Relaxed);
-
-    // 2. Resolve URL สตรีมมิ่ง (ใช้ Direct URL ถ้ามี หรือหาผ่าน Cache/yt-dlp)
-    let stream_url = if let Some(url) = direct_url {
-        url
-    } else if let Some(cached_url) = cache.get_cached_url(&video_id) {
-        cached_url
-    } else {
-        let url = extract::get_direct_url(&video_id)
-            .await
-            .map_err(|e| format!("Failed to extract direct URL: {e}"))?;
-        cache.save_url_cache(video_id.clone(), url.clone());
-        url
-    };
+        .store(duration_secs.unwrap_or(0.0) as u32, Ordering::Relaxed);
 
     let volume = Arc::clone(&state.volume);
     let progress_secs = Arc::clone(&state.progress_secs);
@@ -244,27 +234,53 @@ pub async fn play_audio(
     let eq_enabled = Arc::clone(&state.eq_enabled);
     let eq_gains = Arc::clone(&state.eq_gains);
 
-    std::thread::spawn(move || {
-        let reader = match HttpRangeSource::new(stream_url) {
-            Ok(r) => r,
+    // 2. Download + play in the background so this command returns right away.
+    tauri::async_runtime::spawn(async move {
+        let bytes = match extract::download_audio_bytes(&video_id).await {
+            Ok(b) => b,
             Err(e) => {
-                eprintln!("Failed to open HttpRangeSource: {}", e);
+                eprintln!("[PLAY] Download failed for {video_id}: {e:#}");
+                let _ = app_handle.emit(
+                    "playback-error",
+                    serde_json::json!({
+                        "video_id": video_id,
+                        "error": e.to_string(),
+                    }),
+                );
                 return;
             }
         };
 
-        if let Err(e) = stream_player::play_stream(
-            reader,
-            cancel_flag,
-            volume,
-            progress_secs,
-            is_paused,
-            eq_enabled,
-            eq_gains,
-            app_handle,
-        ) {
-            eprintln!("Playback error: {}", e);
+        // The user may have skipped to another track while we were downloading.
+        if cancel_flag.load(Ordering::SeqCst) {
+            return;
         }
+
+        let playback_error_handle = app_handle.clone();
+        let playback_video_id = video_id.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = stream_player::play_stream(
+                std::io::Cursor::new(bytes),
+                cancel_flag,
+                volume,
+                progress_secs,
+                is_paused,
+                eq_enabled,
+                eq_gains,
+                app_handle,
+                progress_epoch,
+                my_epoch,
+            ) {
+                eprintln!("Playback error: {}", e);
+                let _ = playback_error_handle.emit(
+                    "playback-error",
+                    serde_json::json!({
+                        "video_id": playback_video_id,
+                        "error": e.to_string(),
+                    }),
+                );
+            }
+        });
     });
 
     Ok(())
@@ -304,6 +320,13 @@ pub async fn resolve_audio_url(
         .map_err(|error| error.to_string())?;
     cache.save_url_cache(video_id.clone(), url.clone());
     Ok(url)
+}
+
+#[tauri::command]
+pub async fn get_track_duration(video_id: String) -> Result<Option<f64>, String> {
+    extract::get_duration_secs(&video_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 // อ่าน Progress ตำแหน่งเวลาส่งให้ Frontend
@@ -475,7 +498,6 @@ pub async fn prepare_mixed_session(
     video_id_a: String,
     video_id_b: String,
     state: State<'_, AppState>,
-    cache: State<'_, CacheManager>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let pair_key = (video_id_a.clone(), video_id_b.clone());
@@ -490,21 +512,32 @@ pub async fn prepare_mixed_session(
         }
     }
 
-    // Resolve both stream URLs at the same time instead of one after another.
-    let (url_a, url_b) = tokio::try_join!(
-        resolve_audio_url(video_id_a.clone(), cache.clone()),
-        resolve_audio_url(video_id_b.clone(), cache.clone())
-    )?;
+    // Download both tracks at the same time (network-bound, so this happens
+    // before we take a CPU build slot).
+    let (bytes_a, bytes_b) = match tokio::try_join!(
+        extract::download_audio_bytes(&video_id_a),
+        extract::download_audio_bytes(&video_id_b)
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[MIX PREP] [{pair_label}] Download failed: {e:#}");
+            let _ = app_handle.emit(
+                "mix-prep-failed",
+                MixPrepFailedPayload {
+                    video_id_a,
+                    video_id_b,
+                },
+            );
+            return Err(e.to_string());
+        }
+    };
 
     let prepared_mixes = Arc::clone(&state.prepared_mixes);
     let mix_build_semaphore = Arc::clone(&state.mix_build_semaphore);
 
     tokio::task::spawn_blocking(move || {
-        // Wait for a build slot before doing any decode/analyze/mix work,
-        // so a burst of transitions queues up instead of running several
-        // CPU-heavy builds at once and slowing each other down. We're
-        // still inside the tokio runtime here (just on its blocking pool),
-        // so Handle::block_on works fine for the async Semaphore.
+        // Wait for a CPU build slot so bursts of transitions queue up
+        // instead of running several heavy builds at once.
         let _permit = tokio::runtime::Handle::current()
             .block_on(mix_build_semaphore.acquire_owned())
             .expect("mix build semaphore closed");
@@ -512,10 +545,8 @@ pub async fn prepare_mixed_session(
         let prep_start = std::time::Instant::now();
         println!("[MIX PREP] [{pair_label}] Starting");
 
-        // Single place to bail out of this build: logs, tells the frontend
-        // this pair failed (so it can clear mixPrepKeyRef and retry)
-        // instead of silently leaving the frontend waiting on a pair that
-        // will never arrive, and returns.
+        // Single bail-out point: logs, and tells the frontend this pair failed
+        // so it can clear mixPrepKeyRef and retry.
         let fail = |msg: String| {
             eprintln!("[MIX PREP] [{pair_label}] {}", msg);
             let _ = app_handle.emit(
@@ -527,23 +558,17 @@ pub async fn prepare_mixed_session(
             );
         };
 
-        // Decode Track B on its own OS thread so it happens concurrently
-        // with decoding Track A below - this is typically the single
-        // biggest chunk of the pipeline, so doing it in parallel roughly
-        // halves that portion of the wait.
+        // Decode Track B on its own thread while Track A decodes below.
         let decode_b_handle = std::thread::spawn(move || -> Result<_, String> {
-            let reader_b = HttpRangeSource::new(url_b).map_err(|e| e.to_string())?;
-            stream_player::decode_full_track(reader_b).map_err(|e| e.to_string())
+            stream_player::decode_full_track(std::io::Cursor::new(bytes_b))
+                .map_err(|e| e.to_string())
         });
 
-        let reader_a = match HttpRangeSource::new(url_a) {
-            Ok(r) => r,
-            Err(e) => return fail(format!("Failed opening Track A: {}", e)),
-        };
-        let (samples_a, rate_a, ch_a) = match stream_player::decode_full_track(reader_a) {
-            Ok(data) => data,
-            Err(e) => return fail(format!("Failed decoding Track A: {}", e)),
-        };
+        let (samples_a, rate_a, ch_a) =
+            match stream_player::decode_full_track(std::io::Cursor::new(bytes_a)) {
+                Ok(data) => data,
+                Err(e) => return fail(format!("Failed decoding Track A: {}", e)),
+            };
 
         let (samples_b, rate_b, ch_b) = match decode_b_handle.join() {
             Ok(Ok(data)) => data,
@@ -562,22 +587,14 @@ pub async fn prepare_mixed_session(
             Err(e) => return fail(format!("Analysis failed for Track A: {}", e)),
         };
 
-        // Analyze B at its own native rate/channels BEFORE any conversion -
-        // intro/outro points are measured in seconds, so this must run on
-        // the original decode, matching the Analyzer it's configured with.
+        // Analyze B at its own native rate/channels BEFORE any conversion.
         let analyzer_b = Analyzer::new(rate_b, ch_b);
         let analysis_b = match analyzer_b.analyze(&samples_b) {
             Ok(res) => res,
             Err(e) => return fail(format!("Analysis failed for Track B: {}", e)),
         };
 
-        // Track B may have decoded at a different native rate/channel count
-        // than Track A (e.g. 48kHz vs 44.1kHz source streams). Mixer::mix
-        // assumes both buffers already share one sample_rate/channels, so
-        // align B onto A's format here - otherwise B gets crossfaded and
-        // played back at the wrong speed/pitch, and its declared
-        // track_b_total_secs stops matching how long it actually plays for,
-        // which throws off the *next* transition's timing.
+        // Align B onto A's sample rate / channel count before mixing.
         let samples_b = if rate_b != rate_a || ch_b != ch_a {
             eprintln!(
                 "[MIX PREP] [{pair_label}] Track B is {}Hz/{}ch, Track A is {}Hz/{}ch - resampling B to match",
@@ -659,7 +676,10 @@ pub async fn play_mixed_session(
     }
 
     state.is_paused.store(false, Ordering::SeqCst);
-    state.progress_secs.store(0, Ordering::Relaxed);
+    // NOTE: progress is deliberately NOT reset here. In the fallback path
+    // Track A keeps playing (and reporting progress) while the mix builds;
+    // zeroing it would freeze the UI at 0. The epoch bump + progress store
+    // happen right when the new stream actually starts.
 
     let volume = Arc::clone(&state.volume);
     let progress_secs = Arc::clone(&state.progress_secs);
@@ -667,6 +687,7 @@ pub async fn play_mixed_session(
     let eq_enabled = Arc::clone(&state.eq_enabled);
     let eq_gains = Arc::clone(&state.eq_gains);
     let duration_secs_state = Arc::clone(&state.duration_secs);
+    let progress_epoch = Arc::clone(&state.progress_epoch);
 
     // Reuse a mix that prepare_mixed_session already built in the
     // background, if it matches this exact pair. This is what makes the
@@ -691,6 +712,9 @@ pub async fn play_mixed_session(
         // time" calculations on the frontend end up in a different time
         // frame than transition_at_secs, which is always measured from
         // Track B's true position 0.
+        // Claim progress ownership BEFORE writing the new position, so the
+        // old stream (still alive for ~180ms) stops overwriting it.
+        let my_epoch = progress_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         duration_secs_state.store(mixed.track_b_total_secs as u32, Ordering::Relaxed);
         progress_secs.store(mixed.starts_at_secs_in_b as u32, Ordering::Relaxed);
 
@@ -709,6 +733,8 @@ pub async fn play_mixed_session(
                 eq_enabled,
                 eq_gains,
                 app_handle,
+                progress_epoch,
+                my_epoch,
             ) {
                 eprintln!("Playback error: {}", e);
             }
@@ -838,6 +864,9 @@ pub async fn play_mixed_session(
         };
 
         let initial_offset_secs = mixed.starts_at_secs_in_b + (skip_samples as f64 / bytes_per_sec);
+        // Take over progress reporting only now, right as the new stream
+        // starts (the old stream's progress was read above).
+        let my_epoch = progress_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         duration_secs_state.store(mixed.track_b_total_secs as u32, Ordering::Relaxed);
         progress_secs.store(initial_offset_secs as u32, Ordering::Relaxed);
 
@@ -866,6 +895,8 @@ pub async fn play_mixed_session(
             eq_enabled,
             eq_gains,
             app_handle,
+            progress_epoch,
+            my_epoch,
         ) {
             eprintln!("Playback error: {}", e);
         }
@@ -892,4 +923,3 @@ pub async fn clear_cache(
         .await
         .map_err(|e| e.to_string())
 }
-

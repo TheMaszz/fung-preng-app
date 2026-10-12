@@ -34,8 +34,10 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
   } = usePlayer();
   const formatTime = (seconds: number) =>
     `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+  const totalDurationSecs = durationSecs || currentTrack?.duration_secs || 0;
+  const hasDuration = totalDurationSecs > 0;
   const progressPercent =
-    durationSecs > 0 ? Math.min(100, (positionSecs / durationSecs) * 100) : 0;
+    hasDuration ? Math.min(100, (positionSecs / totalDurationSecs) * 100) : 0;
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     void updateVolume(Number(e.target.value));
@@ -113,15 +115,20 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
 
         <div className="flex w-full items-center gap-2 text-xs text-[#8b949e]">
           <span>{formatTime(positionSecs)}</span>
-          <div className="h-1 flex-1 rounded-full bg-[#30363d] group cursor-pointer">
+          <div
+            role="progressbar"
+            aria-label="Song progress"
+            aria-valuemin={0}
+            aria-valuemax={hasDuration ? totalDurationSecs : undefined}
+            aria-valuenow={hasDuration ? Math.min(positionSecs, totalDurationSecs) : undefined}
+            className="group relative h-1.5 flex-1 cursor-pointer overflow-hidden rounded-full bg-[#30363d]"
+          >
             <div
-              className="h-1 rounded-full bg-[#58a6ff] group-hover:bg-[#79c0ff] transition"
-              style={{ width: `${progressPercent}%` }}
+              className={`h-full rounded-full bg-[#58a6ff] transition-[width] group-hover:bg-[#79c0ff] ${!hasDuration && isPlaying ? "progress-indeterminate" : ""}`}
+              style={{ width: hasDuration ? `${progressPercent}%` : isPlaying ? "35%" : "0%" }}
             />
           </div>
-          <span>
-            {formatTime(durationSecs || currentTrack?.duration_secs || 0)}
-          </span>
+          <span>{hasDuration ? formatTime(totalDurationSecs) : "--:--"}</span>
         </div>
       </div>
 
