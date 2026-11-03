@@ -1,0 +1,10 @@
+This application bundles the official yt-dlp Windows x64 executable,
+version 2026.08.19. The bundled executable contains third-party components
+distributed under their own licenses. The complete third-party license
+notices are maintained by the yt-dlp project at:
+
+https://github.com/yt-dlp/yt-dlp/blob/2026.08.19/THIRD_PARTY_LICENSES.txt
+
+The bundled executable is copied from the installed WinGet package
+yt-dlp.yt-dlp. SHA-256:
+66674953FE251B89F4D08C5F0E35E0728679BD67AB3D7D05C0562AF101DD3E7A

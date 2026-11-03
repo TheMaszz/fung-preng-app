@@ -28,6 +28,21 @@ pub fn run() {
         .manage(AppState::default())
         .manage(cache_manager)
         .setup(|app| {
+            let bundled_ytdlp = app
+                .path()
+                .resolve("binaries/yt-dlp.exe", tauri::path::BaseDirectory::Resource)?;
+            let development_ytdlp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join("yt-dlp.exe");
+            let ytdlp = if bundled_ytdlp.is_file() {
+                bundled_ytdlp
+            } else if development_ytdlp.is_file() {
+                development_ytdlp
+            } else {
+                std::path::PathBuf::from("yt-dlp")
+            };
+            extract::configure_ytdlp_executable(ytdlp);
+
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let database = AppDatabase::open(data_dir.join("fung-pleng.sqlite"))
@@ -50,6 +65,7 @@ pub fn run() {
             commands::add_playlist_track,
             commands::add_track_to_playlist,
             commands::get_playlist_tracks,
+            commands::is_track_in_any_playlist,
             commands::reorder_playlist_tracks,
             commands::remove_track_from_playlist,
             commands::pause_audio,

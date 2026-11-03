@@ -155,10 +155,11 @@ fn fill_output(
     eq: &mut EqProcessor,
     volume: f32,
     paused: bool,
+    stopped: bool,
 ) {
     for frame in data.chunks_mut(2) {
-        if paused || consumer.slots() < 2 {
-            frame.fill(0.0); // paused or underrun: silence
+        if stopped || paused || consumer.slots() < 2 {
+            frame.fill(0.0); // stopped, paused or underrun: silence
             continue;
         }
         let l = consumer.pop().unwrap_or(0.0);
@@ -247,7 +248,7 @@ pub fn play_stream(
     reader: impl std::io::Read + Send + Sync + 'static,
     cancel_flag: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
-    progress_secs: Arc<AtomicU32>,
+    progress_secs: Arc<AtomicU64>,
     is_paused: Arc<AtomicBool>,
     eq_enabled: Arc<AtomicBool>,
     eq_gains: Arc<Mutex<[f32; 7]>>,
@@ -300,6 +301,7 @@ pub fn play_stream(
     let eq_enabled_clone = Arc::clone(&eq_enabled);
     let eq_gains_clone = Arc::clone(&eq_gains);
     let epoch_clone = Arc::clone(&progress_epoch);
+    let callback_cancel_flag = Arc::clone(&cancel_flag);
 
     // Counts frames actually pulled by the audio device callback (i.e.
     // genuinely audible), not frames merely decoded/pushed ahead of time.
@@ -329,7 +331,14 @@ pub fn play_stream(
                 }
             }
 
-            fill_output(data, &mut consumer, &mut eq, current_vol, paused);
+            fill_output(
+                data,
+                &mut consumer,
+                &mut eq,
+                current_vol,
+                paused,
+                callback_cancel_flag.load(Ordering::Relaxed),
+            );
 
             if !paused {
                 consumed_frames += (data.len() / 2) as u64; // output is forced stereo
@@ -338,8 +347,8 @@ pub fn play_stream(
                 // this check it would overwrite the new track's position
                 // with its own (e.g. 241s) and trigger the next transition.
                 if epoch_clone.load(Ordering::Relaxed) == my_epoch {
-                    let secs = (consumed_frames / out_sample_rate as u64) as u32;
-                    progress_clone.store(secs, Ordering::Relaxed);
+                    let secs = consumed_frames as f64 / out_sample_rate as f64;
+                    progress_clone.store(secs.to_bits(), Ordering::Relaxed);
                 }
             }
         },
@@ -598,15 +607,17 @@ pub fn play_pcm_buffer(
     sample_rate: u32,
     channels: usize,
     initial_offset_secs: f64,
+    start_sample_index: usize,
     cancel_flag: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
-    progress_secs: Arc<AtomicU32>,
+    progress_secs: Arc<AtomicU64>,
     is_paused: Arc<AtomicBool>,
     eq_enabled: Arc<AtomicBool>,
     eq_gains: Arc<Mutex<[f32; 7]>>,
     app_handle: AppHandle,
     progress_epoch: Arc<AtomicU64>,
     my_epoch: u64,
+    handoff_cancel: Option<Arc<AtomicBool>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let host = cpal::default_host();
     let device = host
@@ -640,6 +651,7 @@ pub fn play_pcm_buffer(
     let eq_enabled_clone = Arc::clone(&eq_enabled);
     let eq_gains_clone = Arc::clone(&eq_gains);
     let epoch_clone = Arc::clone(&progress_epoch);
+    let callback_cancel_flag = Arc::clone(&cancel_flag);
 
     // Progress is reported from the audio callback, offset by where this
     // buffer starts in the track's own true timeline.
@@ -669,14 +681,21 @@ pub fn play_pcm_buffer(
                 }
             }
 
-            fill_output(data, &mut consumer, &mut eq, current_vol, paused);
+            fill_output(
+                data,
+                &mut consumer,
+                &mut eq,
+                current_vol,
+                paused,
+                callback_cancel_flag.load(Ordering::Relaxed),
+            );
 
             if !paused {
                 consumed_frames += (data.len() / 2) as u64;
                 if epoch_clone.load(Ordering::Relaxed) == my_epoch {
                     let elapsed_secs = consumed_frames as f64 / out_sample_rate as f64;
-                    let secs = (initial_offset_secs + elapsed_secs) as u32;
-                    progress_clone.store(secs, Ordering::Relaxed);
+                    let secs = initial_offset_secs + elapsed_secs;
+                    progress_clone.store(secs.to_bits(), Ordering::Relaxed);
                 }
             }
         },
@@ -684,10 +703,26 @@ pub fn play_pcm_buffer(
         None,
     )?;
 
-    stream.play()?;
-
-    let mut sample_index = 0;
     let total_samples = samples.len();
+    let mut sample_index = start_sample_index.min(total_samples) & !1;
+
+    // Prime about 45 ms of output before starting the device. Starting an
+    // empty callback first can emit silence during the most audible part of
+    // a track handoff.
+    let prime_until = total_samples.min(4096);
+    while sample_index + 1 < prime_until && producer.slots() >= 2 {
+        let _ = producer.push(samples[sample_index]);
+        let _ = producer.push(samples[sample_index + 1]);
+        sample_index += 2;
+    }
+
+    stream.play()?;
+    // The new stream is open and has audio queued, so retire the previous
+    // stream now. Its callback observes the cancel flag and stops emitting
+    // buffered audio immediately.
+    if let Some(old_flag) = handoff_cancel {
+        old_flag.store(true, Ordering::SeqCst);
+    }
 
     // Push pre-mixed buffer frames into the ring buffer, one L/R pair at a time.
     while sample_index + 1 < total_samples && !cancel_flag.load(Ordering::SeqCst) {

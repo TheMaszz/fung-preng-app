@@ -27,7 +27,7 @@ pub type PreparedMixCache = Arc<Mutex<HashMap<(String, String), MixedTrack>>>;
 pub struct AppState {
     pub current_cancel_flag: Mutex<Option<Arc<AtomicBool>>>,
     pub volume: Arc<AtomicU32>,        // ใช้ AtomicU32 เก็บ float bits
-    pub progress_secs: Arc<AtomicU32>, // บันทึกเวลาปัจจุบัน (วินาที)
+    pub progress_secs: Arc<AtomicU64>, // f64 seconds stored as bits for precise handoff timing
     pub duration_secs: Arc<AtomicU32>, // ความยาวเพลงทั้งหมด (วินาที)
     pub is_paused: Arc<AtomicBool>,
     // Bumped every time a new stream starts. Only the stream holding the
@@ -52,7 +52,7 @@ impl Default for AppState {
         Self {
             current_cancel_flag: Mutex::new(None),
             volume: Arc::new(AtomicU32::new(1.0f32.to_bits())), // Default 100% (1.0)
-            progress_secs: Arc::new(AtomicU32::new(0)),
+            progress_secs: Arc::new(AtomicU64::new(0.0f64.to_bits())),
             duration_secs: Arc::new(AtomicU32::new(0)),
             is_paused: Arc::new(AtomicBool::new(false)),
             progress_epoch: Arc::new(AtomicU64::new(0)),
@@ -169,6 +169,14 @@ pub fn get_playlist_tracks(
 }
 
 #[tauri::command]
+pub fn is_track_in_any_playlist(
+    video_id: String,
+    database: State<'_, AppDatabase>,
+) -> Result<bool, String> {
+    database.track_in_any_playlist(&video_id)
+}
+
+#[tauri::command]
 pub fn reorder_playlist_tracks(
     playlist_id: i64,
     track_ids: Vec<String>,
@@ -223,7 +231,7 @@ pub async fn play_audio(
     state.is_paused.store(false, Ordering::SeqCst);
     let my_epoch = state.progress_epoch.fetch_add(1, Ordering::SeqCst) + 1;
     let progress_epoch = Arc::clone(&state.progress_epoch);
-    state.progress_secs.store(0, Ordering::Relaxed);
+    state.progress_secs.store(0.0f64.to_bits(), Ordering::Relaxed);
     state
         .duration_secs
         .store(duration_secs.unwrap_or(0.0) as u32, Ordering::Relaxed);
@@ -332,7 +340,7 @@ pub async fn get_track_duration(video_id: String) -> Result<Option<f64>, String>
 // อ่าน Progress ตำแหน่งเวลาส่งให้ Frontend
 #[tauri::command]
 pub fn get_playback_progress(state: State<'_, AppState>) -> Result<PlaybackProgress, String> {
-    let position_secs = state.progress_secs.load(Ordering::Relaxed) as f64;
+    let position_secs = f64::from_bits(state.progress_secs.load(Ordering::Relaxed));
     let duration_secs = state.duration_secs.load(Ordering::Relaxed) as f64;
 
     Ok(PlaybackProgress {
@@ -399,7 +407,7 @@ pub async fn get_related_tracks(video_id: String) -> Result<Vec<TrackInfo>, Stri
         video_id, video_id
     );
 
-    let output = tokio::process::Command::new("yt-dlp")
+    let output = extract::ytdlp_async_command()
         .args([
             "--flat-playlist",
             "-J",
@@ -625,6 +633,10 @@ pub async fn prepare_mixed_session(
 
         {
             let mut guard = prepared_mixes.lock().unwrap();
+            // A prepared PCM mix can be large (it includes the remainder of
+            // Track B). Retaining obsolete pairs quickly defeats the low
+            // memory goal, so only keep the newest ready handoff.
+            guard.clear();
             guard.insert(pair_key, mixed);
         }
 
@@ -716,9 +728,18 @@ pub async fn play_mixed_session(
         // old stream (still alive for ~180ms) stops overwriting it.
         let my_epoch = progress_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         duration_secs_state.store(mixed.track_b_total_secs as u32, Ordering::Relaxed);
-        progress_secs.store(mixed.starts_at_secs_in_b as u32, Ordering::Relaxed);
-
-        let initial_offset_secs = mixed.starts_at_secs_in_b;
+        // UI polling and command dispatch can arrive a fraction late. Skip
+        // that already elapsed portion of the handoff buffer so playback
+        // never jumps backward to the mix's original transition timestamp.
+        let old_track_now_secs = f64::from_bits(progress_secs.load(Ordering::Relaxed));
+        let stale_by_secs = (old_track_now_secs - mixed.transition_at_secs).max(0.0);
+        let samples_per_second = mixed.sample_rate as f64 * mixed.channels as f64;
+        let start_sample_index = ((stale_by_secs * samples_per_second) as usize)
+            .min(mixed.samples.len())
+            & !1;
+        let initial_offset_secs =
+            mixed.starts_at_secs_in_b + start_sample_index as f64 / samples_per_second;
+        progress_secs.store(initial_offset_secs.to_bits(), Ordering::Relaxed);
 
         tokio::task::spawn_blocking(move || {
             if let Err(e) = stream_player::play_pcm_buffer(
@@ -726,6 +747,7 @@ pub async fn play_mixed_session(
                 mixed.sample_rate,
                 mixed.channels,
                 initial_offset_secs,
+                start_sample_index,
                 cancel_flag,
                 volume,
                 progress_secs,
@@ -735,19 +757,11 @@ pub async fn play_mixed_session(
                 app_handle,
                 progress_epoch,
                 my_epoch,
+                old_cancel_flag,
             ) {
                 eprintln!("Playback error: {}", e);
             }
         });
-
-        // Let the new stream actually get up and running - open the
-        // device, start pushing its first samples - before we stop the
-        // old one. This overlap (not a hard cut) is what makes the handoff
-        // sound seamless.
-        if let Some(old_flag) = old_cancel_flag {
-            tokio::time::sleep(std::time::Duration::from_millis(180)).await;
-            old_flag.store(true, Ordering::SeqCst);
-        }
 
         return Ok(());
     }
@@ -845,7 +859,7 @@ pub async fn play_mixed_session(
         // updated by the old stream's audio callback right up until we
         // cancel it below, so read it now (before we overwrite it) to see
         // where Track A actually is, and skip the buffer forward to match.
-        let old_track_a_now_secs = progress_secs.load(Ordering::Relaxed) as f64;
+        let old_track_a_now_secs = f64::from_bits(progress_secs.load(Ordering::Relaxed));
         let stale_by_secs = (old_track_a_now_secs - mixed.transition_at_secs).max(0.0);
         let bytes_per_sec = mixed.sample_rate as f64 * mixed.channels as f64;
         let skip_samples = ((stale_by_secs * bytes_per_sec) as usize).min(mixed.samples.len());
@@ -857,37 +871,27 @@ pub async fn play_mixed_session(
             );
         }
 
-        let samples_to_play = if skip_samples > 0 {
-            mixed.samples[skip_samples..].to_vec()
-        } else {
-            mixed.samples
-        };
-
-        let initial_offset_secs = mixed.starts_at_secs_in_b + (skip_samples as f64 / bytes_per_sec);
+        let start_sample_index = skip_samples & !1;
+        let initial_offset_secs =
+            mixed.starts_at_secs_in_b + (start_sample_index as f64 / bytes_per_sec);
         // Take over progress reporting only now, right as the new stream
         // starts (the old stream's progress was read above).
         let my_epoch = progress_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         duration_secs_state.store(mixed.track_b_total_secs as u32, Ordering::Relaxed);
-        progress_secs.store(initial_offset_secs as u32, Ordering::Relaxed);
+        progress_secs.store(initial_offset_secs.to_bits(), Ordering::Relaxed);
 
         // Only now - right as we're about to actually start the new
         // stream - do we stop the old one. Everything above (download,
         // decode, analyze, mix) could take many seconds; the old track
         // keeps playing normally the whole time instead of going silent
         // while we work.
-        if let Some(old_flag) = old_cancel_flag {
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(180));
-                old_flag.store(true, Ordering::SeqCst);
-            });
-        }
-
         // Play mixed buffer
         if let Err(e) = stream_player::play_pcm_buffer(
-            samples_to_play,
+            mixed.samples,
             mixed.sample_rate,
             mixed.channels,
             initial_offset_secs,
+            start_sample_index,
             cancel_flag,
             volume,
             progress_secs,
@@ -897,6 +901,7 @@ pub async fn play_mixed_session(
             app_handle,
             progress_epoch,
             my_epoch,
+            old_cancel_flag,
         ) {
             eprintln!("Playback error: {}", e);
         }

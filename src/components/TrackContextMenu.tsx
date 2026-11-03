@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { ListMusic, Loader2, Plus } from "lucide-react";
-import { SearchResult } from "../types";
+import { Track } from "../context/PlayerContext";
 
 type Playlist = { id: number; name: string };
-export type TrackMenuState = { x: number; y: number; track: SearchResult } | null;
+export type TrackMenuState = { x: number; y: number; track: Track } | null;
 
 const MENU_W = 248;
 const MENU_MAX_H = 340;
@@ -60,6 +61,7 @@ export const TrackContextMenu = ({ menu, onClose, onNotify }: Props) => {
         playlistId: playlist.id,
         track,
       });
+      window.dispatchEvent(new Event("playlists-changed"));
       onNotify(added ? `Added to “${playlist.name}”` : `Already in “${playlist.name}”`);
       onClose();
     } catch (e) {
@@ -98,7 +100,7 @@ export const TrackContextMenu = ({ menu, onClose, onNotify }: Props) => {
   const left = Math.max(8, Math.min(x, window.innerWidth - MENU_W - 8));
   const top = Math.max(8, Math.min(y, window.innerHeight - MENU_MAX_H - 8));
 
-  return (
+  return createPortal(
     <>
       {/* backdrop: any click (left or right) outside closes the menu */}
       <div
@@ -188,6 +190,7 @@ export const TrackContextMenu = ({ menu, onClose, onNotify }: Props) => {
           )}
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 };

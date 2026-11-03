@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -55,7 +54,7 @@ pub async fn search_youtube(query: String, offset: usize) -> Result<Vec<SearchRe
     tokio::task::spawn_blocking(move || {
         const PAGE_SIZE: usize = 10;
         let requested_results = offset.saturating_add(PAGE_SIZE);
-        let output = Command::new("yt-dlp")
+        let output = crate::extract::ytdlp_sync_command()
             .args([
                 &format!("ytsearch{}:{}", requested_results, query),
                 "--dump-json",

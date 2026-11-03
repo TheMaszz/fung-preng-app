@@ -1,12 +1,12 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { usePlayer } from "../context/PlayerContext";
+import { TrackContextMenu, TrackMenuState } from "./TrackContextMenu";
 import {
   Heart,
   ListMusic,
-  Mic2,
   Pause,
   Play,
-  Repeat,
-  Shuffle,
   SkipBack,
   SkipForward,
   Volume1,
@@ -44,6 +44,50 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
   };
 
   const VolumeIcon = volume === 0 ? VolumeX : volume < 50 ? Volume1 : Volume2;
+  const [trackMenu, setTrackMenu] = useState<TrackMenuState>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [isInPlaylist, setIsInPlaylist] = useState(false);
+  const toastTimer = useRef<number | undefined>(undefined);
+  const closeTrackMenu = useCallback(() => setTrackMenu(null), []);
+  const notify = useCallback((message: string) => {
+    setToast(message);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2500);
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+
+  useEffect(() => {
+    let active = true;
+    const refreshMembership = () => {
+      if (!currentTrack) {
+        setIsInPlaylist(false);
+        return;
+      }
+      void invoke<boolean>("is_track_in_any_playlist", {
+        videoId: currentTrack.id,
+      })
+        .then((saved) => {
+          if (active) setIsInPlaylist(saved);
+        })
+        .catch((error) => {
+          console.error("Failed to check playlist membership:", error);
+        });
+    };
+
+    refreshMembership();
+    window.addEventListener("playlists-changed", refreshMembership);
+    return () => {
+      active = false;
+      window.removeEventListener("playlists-changed", refreshMembership);
+    };
+  }, [currentTrack?.id]);
+
+  const openPlaylistMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (!currentTrack) return;
+    const bounds = e.currentTarget.getBoundingClientRect();
+    setTrackMenu({ x: bounds.left, y: bounds.top, track: currentTrack });
+  };
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-30 flex h-20 items-center justify-between border-t border-[#30363d] bg-[#161b22]/95 px-4 backdrop-blur-md">
@@ -72,17 +116,22 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
             {currentTrack ? currentTrack.channel : "Select a song"}
           </p>
         </div>
-        <button className="ml-2 text-[#8b949e] hover:text-[#f778ba] transition">
-          <Heart size={16} />
+        <button
+          type="button"
+          aria-label="Add current song to playlist"
+          title="Add to playlist"
+          aria-pressed={isInPlaylist}
+          disabled={!currentTrack}
+          onClick={openPlaylistMenu}
+          className={`ml-2 transition hover:text-[#f778ba] disabled:cursor-not-allowed disabled:opacity-40 ${isInPlaylist ? "text-[#f778ba]" : "text-[#8b949e]"}`}
+        >
+          <Heart size={16} fill={isInPlaylist ? "currentColor" : "none"} />
         </button>
       </div>
 
       {/* Controls */}
       <div className="flex w-1/2 max-w-xl flex-col items-center gap-1">
         <div className="flex items-center gap-5">
-          <button className="text-[#8b949e] hover:text-[#e6edf3] transition">
-            <Shuffle size={18} />
-          </button>
           <button
             className="text-[#c9d1d9] hover:text-[#e6edf3] transition"
             onClick={() => void playPrevious()}
@@ -108,9 +157,6 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
           >
             <SkipForward size={20} fill="currentColor" />
           </button>
-          <button className="text-[#8b949e] hover:text-[#e6edf3] transition">
-            <Repeat size={18} />
-          </button>
         </div>
 
         <div className="flex w-full items-center gap-2 text-xs text-[#8b949e]">
@@ -134,9 +180,6 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
 
       {/* Volume Bar */}
       <div className="flex w-1/4 min-w-[180px] items-center justify-end gap-3 text-[#8b949e]">
-        <button className="hover:text-[#e6edf3] transition">
-          <Mic2 size={16} />
-        </button>
         <button
           className="hover:text-[#e6edf3] transition"
           onClick={queueDrawerHandler}
@@ -161,6 +204,21 @@ export const BottomPlayerBar: React.FC<BottomPlayerBarProps> = ({
           }}
         />
       </div>
+      {trackMenu && (
+        <TrackContextMenu
+          menu={trackMenu}
+          onClose={closeTrackMenu}
+          onNotify={notify}
+        />
+      )}
+      {toast && (
+        <div
+          role="status"
+          className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-[#30363d] bg-[#161b22] px-4 py-2 text-sm text-[#e6edf3] shadow-xl"
+        >
+          {toast}
+        </div>
+      )}
     </footer>
   );
 };

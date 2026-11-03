@@ -69,6 +69,8 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
   const transitionPointsRef = useRef<Map<string, number>>(new Map());
   const trackStartedAtRef = useRef<number>(0);
   const radioQueueRef = useRef(true);
+  const currentTrackRef = useRef<Track | null>(null);
+  currentTrackRef.current = currentTrack;
 
   const prefetchTrackUrl = async (
     index: number,
@@ -125,6 +127,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
 
     setCurrentIndex(index);
     setCurrentTrack(targetTrack);
+    currentTrackRef.current = targetTrack;
     setIsPlaying(true);
     setPositionSecs(0);
     setDurationSecs(targetTrack.duration_secs ?? 0);
@@ -167,6 +170,7 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
 
     setCurrentIndex(toIndex);
     setCurrentTrack(trackB);
+    currentTrackRef.current = trackB;
     setIsPlaying(true);
     setPositionSecs(0);
     setDurationSecs(trackB.duration_secs ?? 0);
@@ -225,6 +229,12 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
       const related = await invoke<Track[]>("get_related_tracks", {
         videoId: baseTrackId,
       });
+
+      // A slow response for the previous track must never be appended to a
+      // newly selected queue.
+      if (!radioQueueRef.current || currentTrackRef.current?.id !== baseTrackId) {
+        return queueRef.current;
+      }
 
       if (related.length === 0) return queueRef.current;
 
@@ -392,10 +402,18 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
   const playTrackWithRadio = async (track: Track) => {
     transitioningRef.current = false;
     radioQueueRef.current = true;
+    similarFetchKeyRef.current = null;
+    mixPrepKeyRef.current = null;
+    transitionPointsRef.current.clear();
 
     const initialTrack = track;
 
+    // Publish a valid one-track queue immediately. This prevents progress
+    // polling and stale related-track requests from seeing the previous queue.
+    setQueue([initialTrack]);
+    setCurrentIndex(0);
     setCurrentTrack(initialTrack);
+    currentTrackRef.current = initialTrack;
     setIsPlaying(true);
     setPositionSecs(0);
     setDurationSecs(initialTrack.duration_secs ?? 0);
@@ -420,6 +438,9 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
       });
 
       const radioQueue = [initialTrack, ...related];
+      if (currentTrackRef.current?.id !== initialTrack.id || !radioQueueRef.current) {
+        return;
+      }
       setQueue(radioQueue);
       setCurrentIndex(0);
 
@@ -428,8 +449,10 @@ export const PlayerProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     } catch (err) {
       console.error("Failed to fetch radio queue:", err);
-      setQueue([initialTrack]);
-      setCurrentIndex(0);
+      if (currentTrackRef.current?.id === initialTrack.id) {
+        setQueue([initialTrack]);
+        setCurrentIndex(0);
+      }
     }
   };
 

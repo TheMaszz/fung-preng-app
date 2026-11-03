@@ -18,6 +18,36 @@ use uuid::Uuid;
 /// make YouTube answer "The page needs to be reloaded" / 403.
 const MAX_CONCURRENT_YTDLP: usize = 2;
 static YTDLP_LIMIT: OnceLock<Semaphore> = OnceLock::new();
+static YTDLP_EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn configure_ytdlp_executable(path: PathBuf) {
+    let _ = YTDLP_EXECUTABLE.set(path);
+}
+
+pub fn ytdlp_executable() -> PathBuf {
+    YTDLP_EXECUTABLE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("yt-dlp"))
+}
+
+pub fn ytdlp_async_command() -> Command {
+    let mut command = Command::new(ytdlp_executable());
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    command
+}
+
+pub fn ytdlp_sync_command() -> std::process::Command {
+    let mut command = std::process::Command::new(ytdlp_executable());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
 fn ytdlp_limit() -> &'static Semaphore {
     YTDLP_LIMIT.get_or_init(|| Semaphore::new(MAX_CONCURRENT_YTDLP))
 }
@@ -25,7 +55,12 @@ fn ytdlp_limit() -> &'static Semaphore {
 /// Recently downloaded audio, so a track downloaded as "Track B" of one mix
 /// is not downloaded AGAIN as "Track A" of the next mix. Halves the number
 /// of YouTube requests and makes prep faster.
-const AUDIO_CACHE_MAX: usize = 4;
+// Keep a small byte-bounded cache. A track's compressed download is
+// useful for the next transition, but retaining several long tracks can
+// otherwise consume hundreds of MB on lower-memory machines.
+const AUDIO_CACHE_MAX: usize = 2;
+const AUDIO_CACHE_MAX_BYTES: usize = 48 * 1024 * 1024;
+const AUDIO_CACHE_MAX_ENTRY_BYTES: usize = 32 * 1024 * 1024;
 static AUDIO_CACHE: OnceLock<Mutex<Vec<(String, Arc<Vec<u8>>)>>> = OnceLock::new();
 fn audio_cache() -> &'static Mutex<Vec<(String, Arc<Vec<u8>>)>> {
     AUDIO_CACHE.get_or_init(|| Mutex::new(Vec::new()))
@@ -38,10 +73,21 @@ fn cache_get(video_id: &str) -> Option<Arc<Vec<u8>>> {
         .map(|(_, bytes)| Arc::clone(bytes))
 }
 fn cache_put(video_id: &str, bytes: Vec<u8>) {
+    if bytes.len() > AUDIO_CACHE_MAX_ENTRY_BYTES {
+        return;
+    }
     let mut guard = audio_cache().lock().unwrap_or_else(|p| p.into_inner());
     guard.retain(|(id, _)| id != video_id);
     guard.insert(0, (video_id.to_string(), Arc::new(bytes)));
     guard.truncate(AUDIO_CACHE_MAX);
+    let mut total_bytes = 0usize;
+    guard.retain(|(_, data)| {
+        if total_bytes.saturating_add(data.len()) > AUDIO_CACHE_MAX_BYTES {
+            return false;
+        }
+        total_bytes += data.len();
+        true
+    });
 }
 
 /// A resolved audio stream: the direct URL PLUS the exact HTTP headers
@@ -58,7 +104,7 @@ pub async fn resolve_audio(video_id: &str) -> Result<ResolvedAudio> {
     let _permit = ytdlp_limit().acquire().await?;
     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
 
-    let output = Command::new("yt-dlp")
+    let output = ytdlp_async_command()
         .args([
             "-j",
             "-f",
@@ -103,7 +149,7 @@ pub async fn resolve_audio(video_id: &str) -> Result<ResolvedAudio> {
 async fn get_direct_url_once(video_id: &str, extra: &[String]) -> Result<String> {
     let _permit = ytdlp_limit().acquire().await?;
     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
-    let output = Command::new("yt-dlp")
+    let output = ytdlp_async_command()
         .args([
             "-g",
             "-f",
@@ -162,7 +208,7 @@ fn is_permanent_error(msg: &str) -> bool {
 pub async fn get_duration_secs(video_id: &str) -> Result<Option<f64>> {
     let _permit = ytdlp_limit().acquire().await?;
     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
-    let output = Command::new("yt-dlp")
+    let output = ytdlp_async_command()
         .args([
             "--no-warnings",
             "--no-playlist",
@@ -248,7 +294,7 @@ async fn extract_audio_once(video_id: &str, extra: &[String]) -> Result<PathBuf>
     let file_stem = format!("automix_{}", Uuid::new_v4());
     let output_template = temp_dir.join(format!("{file_stem}.%(ext)s"));
 
-    let output = Command::new("yt-dlp")
+    let output = ytdlp_async_command()
         .arg("-f")
         .arg("bestaudio[ext=m4a]/bestaudio")
         .arg("-o")

@@ -5,12 +5,12 @@ import {
   Home,
   ListMusic,
   Loader2,
-  Music,
   Plus,
   Settings,
   Trash2,
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
+import appIcon from "../assets/fung-pleng-icon.jpg";
 
 type Playlist = { id: number; name: string };
 type MenuState = { x: number; y: number; playlist: Playlist } | null;
@@ -91,6 +91,7 @@ export const Sidebar: React.FC = () => {
     setSaving(true);
     try {
       await invoke("create_playlist", { name });
+      window.dispatchEvent(new Event("playlists-changed"));
       await loadPlaylists();
       cancelCreate();
     } catch (e) {
@@ -186,6 +187,7 @@ export const Sidebar: React.FC = () => {
     setPlaylists((list) => list.filter((p) => p.id !== target.id)); // optimistic
     try {
       await invoke("delete_playlist", { playlistId: target.id });
+      window.dispatchEvent(new Event("playlists-changed"));
     } catch (e) {
       console.error("Failed to delete playlist:", e);
       setPlaylists(previous); // roll back
@@ -204,11 +206,13 @@ export const Sidebar: React.FC = () => {
       <aside className="flex w-60 flex-col border-r border-[#30363d] bg-[#010409] p-4 pb-24 shrink-0 select-none">
         {/* App Logo */}
         <div className="flex items-center gap-3 px-2 py-3 mb-2">
-          <div className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-tr from-[#a371f7] to-[#58a6ff] text-white font-bold">
-            <Music size={18} />
-          </div>
+          <img
+            src={appIcon}
+            alt=""
+            className="h-9 w-9 rounded-lg object-cover"
+          />
           <span className="text-lg font-bold tracking-tight text-[#e6edf3]">
-            Melody
+            Fung Pleng
           </span>
         </div>
 

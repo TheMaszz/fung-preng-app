@@ -244,6 +244,17 @@ impl AppDatabase {
             .map_err(|error| error.to_string())
     }
 
+    pub fn track_in_any_playlist(&self, video_id: &str) -> Result<bool, String> {
+        let connection = self.connection.lock().map_err(|_| "Database lock poisoned")?;
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM playlist_tracks WHERE video_id = ?1)",
+                [video_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())
+    }
+
     pub fn reorder_playlist_tracks(
         &self,
         playlist_id: i64,

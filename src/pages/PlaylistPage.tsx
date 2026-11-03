@@ -264,6 +264,7 @@ const PlaylistPage = () => {
           playlistId,
           trackId: track.id,
         });
+        window.dispatchEvent(new Event("playlists-changed"));
       } catch (err) {
         console.error("Failed to remove track:", err);
         queryClient.setQueryData(tracksKey, previous);

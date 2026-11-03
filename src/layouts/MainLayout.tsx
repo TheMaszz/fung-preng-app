@@ -17,7 +17,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   };
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#0d1117] text-[#c9d1d9]">
+    <div
+      className="flex h-screen overflow-hidden bg-[#0d1117] text-[#c9d1d9]"
+      onContextMenu={(event) => event.preventDefault()}
+    >
       {/* Sidebar Navigation */}
       <Sidebar />
 
