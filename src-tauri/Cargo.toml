@@ -1,6 +1,6 @@
 [package]
 name = "fung-pleng-app"
-version = "1.0.0"
+version = "1.0.1"
 description = "Fung Preng App"
 authors = ["TheMasz"]
 edition = "2021"
