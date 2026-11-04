@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 pub struct UrlCacheEntry {
     pub url: String,
+    pub headers: HashMap<String, String>,
     pub fetched_at: Instant,
 }
-
 /// Sizes in bytes, split by what the files actually are on disk.
 #[derive(Serialize, Clone, Default)]
 pub struct CacheStats {
@@ -53,26 +53,40 @@ impl CacheManager {
         Self::new(PathBuf::from("./cache"))
     }
 
-    pub fn get_cached_url(&self, video_id: &str) -> Option<String> {
+    pub fn get_cached_audio(&self, video_id: &str) -> Option<(String, HashMap<String, String>)> {
         let cache = self.url_cache.read().ok()?;
-        if let Some(entry) = cache.get(video_id) {
-            if entry.fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
-                return Some(entry.url.clone());
-            }
+        let entry = cache.get(video_id)?;
+        if entry.fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
+            Some((entry.url.clone(), entry.headers.clone()))
+        } else {
+            None
         }
-        None
     }
 
-    pub fn save_url_cache(&self, video_id: String, url: String) {
+    pub fn save_audio_cache(
+        &self,
+        video_id: String,
+        url: String,
+        headers: HashMap<String, String>,
+    ) {
         if let Ok(mut cache) = self.url_cache.write() {
             cache.insert(
                 video_id,
                 UrlCacheEntry {
                     url,
+                    headers,
                     fetched_at: Instant::now(),
                 },
             );
         }
+    }
+
+    pub fn get_cached_url(&self, video_id: &str) -> Option<String> {
+        self.get_cached_audio(video_id).map(|(url, _)| url)
+    }
+
+    pub fn save_url_cache(&self, video_id: String, url: String) {
+        self.save_audio_cache(video_id, url, HashMap::new());
     }
 
     pub fn get_audio_path(&self, video_id: &str) -> Option<PathBuf> {

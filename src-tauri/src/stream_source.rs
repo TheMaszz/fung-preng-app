@@ -1,6 +1,7 @@
 // src-tauri/src/stream_source.rs
 use anyhow::{anyhow, Result};
 use std::io::{Read, Seek, SeekFrom};
+use std::collections::HashMap;
 use ureq::Agent;
 
 pub struct HttpRangeSource {
@@ -11,10 +12,11 @@ pub struct HttpRangeSource {
     buffer_start: u64,
     chunk_size: u64,
     agent: Agent, // Persistent HTTP connection pool
+    headers: HashMap<String, String>,
 }
 
 impl HttpRangeSource {
-    pub fn new(url: String) -> Result<Self> {
+    pub fn new(url: String, headers: &HashMap<String, String>) -> Result<Self> {
         const INITIAL_CHUNK_SIZE: u64 = 256 * 1024;
         const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 
@@ -23,10 +25,11 @@ impl HttpRangeSource {
             .build();
 
         let end = INITIAL_CHUNK_SIZE - 1;
-        let resp = agent
-            .get(&url)
-            .set("Range", &format!("bytes=0-{end}"))
-            .call()?;
+        let mut request = agent.get(&url).set("Range", &format!("bytes=0-{end}"));
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
+        let resp = request.call()?;
 
         if resp.status() != 206 {
             return Err(anyhow!(
@@ -52,6 +55,7 @@ impl HttpRangeSource {
             buffer_start: 0,
             chunk_size: DEFAULT_CHUNK_SIZE,
             agent,
+            headers: headers.clone(),
         })
     }
 
@@ -66,7 +70,13 @@ impl HttpRangeSource {
         let range = format!("bytes={}-{}", self.pos, end);
 
         // Reuses existing TCP connection
-        let resp = self.agent.get(&self.url).set("Range", &range).call()?;
+        let mut request = self.agent.get(&self.url).set("Range", &range);
+        // yt-dlp URLs are often bound to the exact headers returned with
+        // them. Keep those headers on every range request.
+        for (name, value) in &self.headers {
+            request = request.set(name, value);
+        }
+        let resp = request.call()?;
 
         if resp.status() != 206 {
             return Err(anyhow!(

@@ -363,6 +363,7 @@ pub fn play_stream(
     let mut resampler = StreamResampler::new(track_sample_rate, out_sample_rate, 2);
 
     // 4. Decoding Loop
+    let mut clean_eof = false;
     while !cancel_flag.load(Ordering::SeqCst) {
         // Sleep loop when paused to minimize CPU consumption
         while is_paused.load(Ordering::Relaxed) {
@@ -381,6 +382,7 @@ pub fn play_stream(
             Err(symphonia::core::errors::Error::IoError(ref io_err))
                 if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
+                clean_eof = true;
                 break; // Genuine, clean end of stream.
             }
             Err(e) => {
@@ -388,7 +390,7 @@ pub fn play_stream(
                 // dropped mid-stream. Log it so it doesn't look like the
                 // track finishing normally.
                 eprintln!("[STREAM] Playback stopped early, likely a network error: {e}");
-                break;
+                return Err(Box::new(e));
             }
         };
 
@@ -441,7 +443,7 @@ pub fn play_stream(
     }
 
     // Notify frontend when track ends naturally
-    if !cancel_flag.load(Ordering::SeqCst) {
+    if clean_eof && !cancel_flag.load(Ordering::SeqCst) {
         let _ = app_handle.emit("track-ended", ());
     }
 

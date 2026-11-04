@@ -99,9 +99,7 @@ pub struct ResolvedAudio {
     pub headers: HashMap<String, String>,
 }
 
-/// Resolves URL + headers using `yt-dlp -j` (JSON), without downloading.
-pub async fn resolve_audio(video_id: &str) -> Result<ResolvedAudio> {
-    let _permit = ytdlp_limit().acquire().await?;
+async fn resolve_audio_once(video_id: &str, extra: &[String]) -> Result<ResolvedAudio> {
     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
 
     let output = ytdlp_async_command()
@@ -112,10 +110,9 @@ pub async fn resolve_audio(video_id: &str) -> Result<ResolvedAudio> {
             "--no-playlist",
             "--no-warnings",
             "--force-ipv4",
-            // NOTE: no --user-agent override on purpose. Let yt-dlp use the
-            // UA that matches the client it resolved the URL with.
-            &video_url,
         ])
+        .args(extra)
+        .arg(&video_url)
         .output()
         .await
         .context("failed to spawn yt-dlp - is it installed and on PATH?")?;
@@ -144,6 +141,36 @@ pub async fn resolve_audio(video_id: &str) -> Result<ResolvedAudio> {
     }
 
     Ok(ResolvedAudio { url, headers })
+}
+
+/// User pressed play: skip the yt-dlp limiter (so we never queue behind
+/// background work) and retry with other player clients on failure,
+/// with short pauses.
+pub async fn resolve_audio(video_id: &str) -> Result<ResolvedAudio> {
+    let mut last_err = None;
+    for (i, extra) in attempt_args().iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(Duration::from_millis(400 * i as u64)).await;
+        }
+        match resolve_audio_once(video_id, extra).await {
+            Ok(audio) => return Ok(audio),
+            Err(e) => {
+                let permanent = is_permanent_error(&format!("{e}"));
+                last_err = Some(e);
+                if permanent {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("no attempts were made for {video_id}")))
+}
+
+/// Background prefetch: keeps the concurrency limit so bursts don't
+/// trigger YouTube 403s.
+pub async fn resolve_audio_background(video_id: &str) -> Result<ResolvedAudio> {
+    let _permit = ytdlp_limit().acquire().await?;
+    resolve_audio_once(video_id, &[]).await
 }
 
 async fn get_direct_url_once(video_id: &str, extra: &[String]) -> Result<String> {

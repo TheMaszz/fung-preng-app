@@ -194,16 +194,34 @@ pub fn remove_track_from_playlist(
     database.remove_playlist_track(playlist_id, &track_id)
 }
 
-// Command สำหรับสั่งเล่นเพลง (แก้ปัญหา Mixing เพลงซ้อน)
+async fn open_range_source(
+    url: String,
+    headers: HashMap<String, String>,
+) -> Option<HttpRangeSource> {
+    match tokio::task::spawn_blocking(move || HttpRangeSource::new(url, &headers)).await {
+        Ok(Ok(source)) => Some(source),
+        Ok(Err(e)) => {
+            eprintln!("[PLAY] range source failed: {e:#}");
+            None
+        }
+        Err(e) => {
+            eprintln!("[PLAY] range source task failed: {e}");
+            None
+        }
+    }
+}
+
+// Command สำหรับสั่งเล่นเพลง
 #[tauri::command]
 pub async fn play_audio(
     video_id: String,
-    duration_secs: Option<f64>, // was Option<u64>: YouTube durations are fractional
-    direct_url: Option<String>, // kept so the JS call signature doesn't change
+    duration_secs: Option<f64>,
+    direct_url: Option<String>,
     state: State<'_, AppState>,
+    cache: State<'_, CacheManager>, // เพิ่มใหม่ (Tauri inject ให้อัตโนมัติ JS ไม่ต้องแก้)
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    let _ = &direct_url; // no longer used: we download the audio ourselves
+    let cache = cache.inner().clone();
 
     // 1. Cancel the previous track and install a fresh cancel flag.
     let cancel_flag = {
@@ -242,33 +260,82 @@ pub async fn play_audio(
     let eq_enabled = Arc::clone(&state.eq_enabled);
     let eq_gains = Arc::clone(&state.eq_gains);
 
-    // 2. Download + play in the background so this command returns right away.
+    // 2. Resolve the stream and begin with a small HTTP range instead of
+    // downloading the complete song before playback can start.
     tauri::async_runtime::spawn(async move {
-        let bytes = match extract::download_audio_bytes(&video_id).await {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[PLAY] Download failed for {video_id}: {e:#}");
-                let _ = app_handle.emit(
-                    "playback-error",
-                    serde_json::json!({
-                        "video_id": video_id,
-                        "error": e.to_string(),
-                    }),
-                );
-                return;
-            }
-        };
+        let t0 = std::time::Instant::now();
+        let mut stream_source: Option<HttpRangeSource> = None;
+        let mut path = "none";
 
-        // The user may have skipped to another track while we were downloading.
+        // 2a. A URL we already know (from JS or from prefetch): no yt-dlp.
+        let known = match direct_url {
+            Some(url) => Some((url, HashMap::new())),
+            None => cache.get_cached_audio(&video_id),
+        };
+        if let Some((url, headers)) = known {
+            stream_source = open_range_source(url, headers).await;
+            if stream_source.is_some() {
+                path = "cache";
+            } else {
+                eprintln!("[PLAY] {video_id}: cached URL unusable, re-resolving");
+            }
+        }
+
+        // 2b. Nothing cached (or it expired): ask yt-dlp.
+        if stream_source.is_none() && !cancel_flag.load(Ordering::SeqCst) {
+            match extract::resolve_audio(&video_id).await {
+                Ok(audio) => {
+                    cache.save_audio_cache(
+                        video_id.clone(),
+                        audio.url.clone(),
+                        audio.headers.clone(),
+                    );
+                    stream_source = open_range_source(audio.url, audio.headers).await;
+                    if stream_source.is_some() {
+                        path = "yt-dlp";
+                    }
+                }
+                Err(e) => eprintln!("[PLAY] {video_id}: resolve failed: {e:#}"),
+            }
+        }
+
+        // The user may have skipped to another track while we were waiting.
+        // Bail out before starting the (very slow) full-download fallback.
         if cancel_flag.load(Ordering::SeqCst) {
             return;
         }
+
+        // Some YouTube formats/servers do not support byte ranges. Keep the
+        // reliable downloader as a last-resort fallback for those tracks.
+        let reader: Box<dyn std::io::Read + Send + Sync> = if let Some(source) = stream_source {
+            Box::new(source)
+        } else {
+            path = "FULL-DOWNLOAD-FALLBACK";
+            match extract::download_audio_bytes(&video_id).await {
+                Ok(bytes) => Box::new(std::io::Cursor::new(bytes)),
+                Err(e) => {
+                    eprintln!("[PLAY] Could not start {video_id}: {e:#}");
+                    let _ = app_handle.emit(
+                        "playback-error",
+                        serde_json::json!({
+                            "video_id": video_id,
+                            "error": e.to_string(),
+                        }),
+                    );
+                    return;
+                }
+            }
+        };
+        if cancel_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        println!("[PLAY] {video_id}: source ready in {:?} via {path}", t0.elapsed());
 
         let playback_error_handle = app_handle.clone();
         let playback_video_id = video_id.clone();
         std::thread::spawn(move || {
             if let Err(e) = stream_player::play_stream(
-                std::io::Cursor::new(bytes),
+                reader,
                 cancel_flag,
                 volume,
                 progress_secs,
@@ -303,11 +370,11 @@ pub async fn prefetch_track_urls(
 
     tokio::spawn(async move {
         for video_id in video_ids.into_iter().take(3) {
-            if cache_manager.get_cached_url(&video_id).is_some() {
+            if cache_manager.get_cached_audio(&video_id).is_some() {
                 continue;
             }
-            if let Ok(url) = extract::get_direct_url(&video_id).await {
-                cache_manager.save_url_cache(video_id, url);
+            if let Ok(audio) = extract::resolve_audio_background(&video_id).await {
+                cache_manager.save_audio_cache(video_id, audio.url, audio.headers);
             }
         }
     });
@@ -786,11 +853,11 @@ pub async fn play_mixed_session(
             .block_on(mix_build_semaphore.acquire_owned())
             .expect("mix build semaphore closed");
 
-        let reader_a = match HttpRangeSource::new(url_a) {
+        let reader_a = match HttpRangeSource::new(url_a, &HashMap::new()) {
             Ok(r) => r,
             Err(e) => return eprintln!("Failed opening Track A: {}", e),
         };
-        let reader_b = match HttpRangeSource::new(url_b) {
+        let reader_b = match HttpRangeSource::new(url_b, &HashMap::new()) {
             Ok(r) => r,
             Err(e) => return eprintln!("Failed opening Track B: {}", e),
         };
